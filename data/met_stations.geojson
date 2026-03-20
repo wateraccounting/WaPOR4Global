@@ -1,0 +1,21 @@
+{
+"type": "FeatureCollection",
+"name": "met_stations",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:OGC:1.3:CRS84" } },
+"features": [
+{ "type": "Feature", "properties": { "field_1": 0, "Station_code": "ET000063333", "latitude": 11.117, "longitude": 39.733, "elevation_(m)": 1903.0 }, "geometry": { "type": "Point", "coordinates": [ 39.733, 11.117 ] } },
+{ "type": "Feature", "properties": { "field_1": 1, "Station_code": "ET000063402", "latitude": 7.667, "longitude": 36.833, "elevation_(m)": 1725.0 }, "geometry": { "type": "Point", "coordinates": [ 36.833, 7.667 ] } },
+{ "type": "Feature", "properties": { "field_1": 2, "Station_code": "ET000063450", "latitude": 9.033, "longitude": 38.75, "elevation_(m)": 2354.0 }, "geometry": { "type": "Point", "coordinates": [ 38.75, 9.033 ] } },
+{ "type": "Feature", "properties": { "field_1": 3, "Station_code": "KE000063740", "latitude": -1.317, "longitude": 36.917, "elevation_(m)": 1624.0 }, "geometry": { "type": "Point", "coordinates": [ 36.917, -1.317 ] } },
+{ "type": "Feature", "properties": { "field_1": 4, "Station_code": "MLM00061257", "latitude": 14.482, "longitude": -11.44, "elevation_(m)": 51.5 }, "geometry": { "type": "Point", "coordinates": [ -11.44, 14.482 ] } },
+{ "type": "Feature", "properties": { "field_1": 5, "Station_code": "MLM00061265", "latitude": 14.513, "longitude": -4.08, "elevation_(m)": 276.1 }, "geometry": { "type": "Point", "coordinates": [ -4.08, 14.513 ] } },
+{ "type": "Feature", "properties": { "field_1": 6, "Station_code": "MZ000067217", "latitude": -13.3, "longitude": 35.233, "elevation_(m)": 1365.0 }, "geometry": { "type": "Point", "coordinates": [ 35.233, -13.3 ] } },
+{ "type": "Feature", "properties": { "field_1": 7, "Station_code": "MZ000067283", "latitude": -17.883, "longitude": 36.883, "elevation_(m)": 16.0 }, "geometry": { "type": "Point", "coordinates": [ 36.883, -17.883 ] } },
+{ "type": "Feature", "properties": { "field_1": 8, "Station_code": "MZ000067323", "latitude": -23.867, "longitude": 35.383, "elevation_(m)": 15.0 }, "geometry": { "type": "Point", "coordinates": [ 35.383, -23.867 ] } },
+{ "type": "Feature", "properties": { "field_1": 9, "Station_code": "NG000001049", "latitude": 14.25, "longitude": 13.12, "elevation_(m)": 289.0 }, "geometry": { "type": "Point", "coordinates": [ 13.12, 14.25 ] } },
+{ "type": "Feature", "properties": { "field_1": 10, "Station_code": "NG000001052", "latitude": 13.5, "longitude": 2.13, "elevation_(m)": 216.0 }, "geometry": { "type": "Point", "coordinates": [ 2.13, 13.5 ] } },
+{ "type": "Feature", "properties": { "field_1": 11, "Station_code": "NG000001090", "latitude": 13.8, "longitude": 9.0, "elevation_(m)": 489.0 }, "geometry": { "type": "Point", "coordinates": [ 9.0, 13.8 ] } },
+{ "type": "Feature", "properties": { "field_1": 12, "Station_code": "SF000068920", "latitude": -34.833, "longitude": 20.017, "elevation_(m)": 14.0 }, "geometry": { "type": "Point", "coordinates": [ 20.017, -34.833 ] } },
+{ "type": "Feature", "properties": { "field_1": 13, "Station_code": "SF000227590", "latitude": -33.617, "longitude": 19.467, "elevation_(m)": 270.0 }, "geometry": { "type": "Point", "coordinates": [ 19.467, -33.617 ] } }
+]
+}
