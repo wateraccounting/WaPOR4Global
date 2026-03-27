@@ -1,1 +1,12 @@
 Here you can find the colab code to download WaPOR data 
+
+The scripts used in this notebook are built with the WaPOR Version 3 API to download and preprocess different types for data for a selected area(s) of interest and store them in different formats (raster or timeseries):
+
+*   Download raster images for the area of interest and store in a netCDF format
+*   Download timeseries from polygons and store in a csv format
+*   Download timeseries for points and store in a csv format
+*   Download timeseries for a polygon and masked for land cover or crop type and store as csv file
+
+The scripts also explain how to download AgERA5 data (available from 1979) useful for long term climatic analyses
+
+NOTE: download the python script [download_WaPOR_v3_data.py](https://github.com/wateraccounting/WaPOR4Global/blob/main/1.%20Accessing%20WaPOR%20data/download_WaPOR_v3_data.py) and upload it to your Colab session to be able to run the scripts.
