@@ -1040,67 +1040,57 @@ def sample_url_worker(url, pts_coords):
 
 def sample_url_worker_polygon(url, polygons, stat="mean"):
     """
-    Robust polygon sampling with fallback for very small polygons.
+    Optimized for Dask using rioxarray. 
+    Maintains fallback logic for polygons smaller than a pixel.
     """
     results = []
-
+    
     try:
-        with rasterio.open(url) as src:
-            res_x, res_y = src.res  # pixel size
+        # 1. Open the dataset lazily. 
+        # chunks={} forces the use of Dask without specifying exact sizes.
+        ds = rio.open_rasterio(url, chunks=True, mask_and_scale=True)
+        
+        # Determine resolution once
+        res_x = abs(ds.rio.transform()[0])
+        res_y = abs(ds.rio.transform()[4])
 
-            for poly in polygons:
-                bounds = poly.bounds
-                minx, miny, maxx, maxy = bounds
+        for poly in polygons:
+            bounds = poly.bounds
+            minx, miny, maxx, maxy = bounds
 
-                # Check if polygon is smaller than a pixel
-                if (maxx - minx) < res_x or (maxy - miny) < res_y:
-                    # Use centroid pixel directly
-                    row, col = src.index(poly.centroid.x, poly.centroid.y)
-                    val = src.read(1)[row, col]
-                    results.append(val)
-                    continue
+            # Check if polygon is smaller than a pixel
+            if (maxx - minx) < res_x or (maxy - miny) < res_y:
+                # Use sel with method='nearest' to get the centroid pixel value
+                val = ds.sel(x=poly.centroid.x, y=poly.centroid.y, method="nearest")
+                results.append(float(val.values.flatten()[0]))
+                continue
 
-                # Normal windowed read
-                window = from_bounds(minx, miny, maxx, maxy, transform=src.transform)
-                window = window.round_offsets().round_lengths()
-
-                # Ensure valid window
-                if window.width <= 0 or window.height <= 0:
-                    row, col = src.index(poly.centroid.x, poly.centroid.y)
-                    val = src.read(1)[row, col]
-                    results.append(val)
-                    continue
-
-                data = src.read(1, window=window, masked=True)
-                transform = src.window_transform(window)
-
-                mask = geometry_mask(
-                    [poly],
-                    transform=transform,
-                    invert=True,
-                    out_shape=data.shape,
-                    # all_touched=True,
-                )
-                vals = data[mask]
-
-                # If still empty, fallback to centroid
-                if vals.size == 0:
-                    row, col = src.index(poly.centroid.x, poly.centroid.y)
-                    vals = np.array([src.read(1)[row, col]])
-
-                # Compute statistic
+            try:
+                # 2. Use rioxarray's clip for normal polygons
+                # all_touched=True ensures we don't get empty results for edge cases
+                clipped = ds.rio.clip([mapping(poly)], all_touched=True)
+                
+                # Compute the required statistic
                 if stat == "mean":
-                    results.append(np.nanmean(vals))
-                elif stat == "sum":
-                    results.append(np.nansum(vals))
-                elif stat == "min":
-                    results.append(np.nanmin(vals))
+                    val = clipped.mean()
                 elif stat == "max":
-                    results.append(np.nanmax(vals))
+                    val = clipped.max()
+                elif stat == "min":
+                    val = clipped.min()
+                elif stat == "sum":
+                    val = clipped.sum()
                 elif stat == "median":
-                    results.append(np.nanmedian(vals))
+                    val = clipped.median()
                 else:
-                    raise ValueError("Unsupported statistic")
+                    raise ValueError(f"Unsupported statistic: {stat}")
+                
+                # Trigger computation for this small subset only
+                results.append(float(val.compute().values.flatten()[0]))
+                
+            except Exception:
+                # Final fallback to centroid if clipping fails or is empty
+                val = ds.sel(x=poly.centroid.x, y=poly.centroid.y, method="nearest")
+                results.append(float(val.values.flatten()[0]))
 
         return results
 
