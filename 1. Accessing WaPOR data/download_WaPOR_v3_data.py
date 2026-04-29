@@ -33,7 +33,7 @@ from dask.distributed import Client, LocalCluster, get_client
 from dateutil import parser
 from osgeo import gdal
 from rasterio.features import geometry_mask
-from rasterio.warp import Resampling, calculate_default_transform, reproject
+from rasterio.warp import Resampling, reproject, transform_bounds
 from rasterio.windows import from_bounds
 from shapely.geometry import box
 
@@ -456,36 +456,57 @@ def get_level3_code(shape):
     return get_country_code_for_L3_v3(l3url[1], shape)
 
 
+def get_template_var(variables):
+    template_var = None
+    l3 = [x for x in variables if "L3" in x]
+    l2 = [x for x in variables if "L2" in x]
+    l1 = [x for x in variables if "L1" in x]
+    if len(l3) > 0:
+        template_var = l3[0]
+    elif len(l2) > 0:
+        template_var = l2[0]
+    elif len(l1) > 0:
+        template_var = l1[0]
+    else:
+        print("No variabke to be used as a template.")
+    return template_var
+
+
+def get_template_url(template_var, shape):
+    level, var_code, tres = template_var.split("-")
+    template = f"{level}-AETI-A"
+    print(f"using {template} as template.")
+    yr = ["2018-01-01", "2018-12-31"]
+    if "L3-" in template:
+        location, l3code, tempurl = get_level3_code(shape)
+        # unit_ans_scale, urls = generate_urls_v3(template, l3code, yr)
+    else:
+        unit_ans_scale, urls = generate_urls_v3(template, l3_region=None, period=yr)
+        tempurl = list(urls)[0]
+    return template, tempurl
+
+
 def get_template_rst(dir, variables, shape, bbox):
     # Downlaod AETI  raster and clip it so that it can be used as a templat
     temp_file = os.path.join(dir, "template_rst.tif")
-    template_var = None
+
     if not (os.path.exists(temp_file)):
-        l3 = [x for x in variables if "L3" in x]
-        l2 = [x for x in variables if "L2" in x]
-        l1 = [x for x in variables if "L1" in x]
-        if len(l3) > 0:
-            template_var = l3[0]
-        elif len(l2) > 0:
-            template_var = l2[0]
-        elif len(l1) > 0:
-            template_var = l1[0]
-        else:
-            print("No variabke to be used as a template.")
+        template_var = get_template_var(variables)
 
         if template_var is not None:
-            level, var_code, tres = template_var.split("-")
-            template = f"{level}-AETI-A"
-            print(f"using {template} as template.")
-            yr = ["2018-01-01", "2018-12-31"]
-            if "L3-" in template:
-                location, l3code, tempurl = get_level3_code(shape)
-                # unit_ans_scale, urls = generate_urls_v3(template, l3code, yr)
-            else:
-                unit_ans_scale, urls = generate_urls_v3(
-                    template, l3_region=None, period=yr
-                )
-                tempurl = list(urls)[0]
+            template, tempurl = get_template_url(template_var, shape)
+            # level, var_code, tres = template_var.split("-")
+            # template = f"{level}-AETI-A"
+            # print(f"using {template} as template.")
+            # yr = ["2018-01-01", "2018-12-31"]
+            # if "L3-" in template:
+            #     location, l3code, tempurl = get_level3_code(shape)
+            #     # unit_ans_scale, urls = generate_urls_v3(template, l3code, yr)
+            # else:
+            #     unit_ans_scale, urls = generate_urls_v3(
+            #         template, l3_region=None, period=yr
+            #     )
+            #     tempurl = list(urls)[0]
 
             if "L3" in template:
                 ds = gdal.Open(f"/vsicurl/{tempurl}")
@@ -1179,158 +1200,133 @@ def prepare_polygon_for_zonal_stat(shape, polygons_col_name, first_url, crs, var
         return None, None
 
     # Handle naming/labeling
-    if polygons_col_name in subset_gdf.columns.str.lower():
-        column_label = subset_gdf.block.to_list()
+    subset_gdf.columns = subset_gdf.columns.str.lower()
+    if polygons_col_name.lower() in subset_gdf.columns.str.lower():
+        column_label = subset_gdf[polygons_col_name].to_list()
     else:
+        print(
+            f"The {polygons_col_name} is not found in the shapefile columns. Uisng index."
+        )
         column_label = subset_gdf.index.to_list()
 
     print(f"{len(subset_gdf)} polygons are within the bounds of {variable}")
     return subset_gdf, column_label
 
 
-def align_lcc_raster(lcc_path, first_url):
-    """
-    Allocates memory ONLY for the area where LCC and Value raster overlap.
-    The lcc raster is aligned to the raster from the url.
-    """
-    with rasterio.open(first_url) as ref:
-        with rasterio.open(lcc_path) as src_lcc:
-            # 1. Get the bounds of the LCC in the Value Raster's CRS
-            # This 'crops' our focus to just the small LCC area
-            lcc_bounds = src_lcc.bounds
-
-            # 2. Create a window corresponding to these bounds in the ref raster
-            window = from_bounds(*lcc_bounds, transform=ref.transform)
-            window = window.round_offsets().round_lengths()
-
-            # Check if the window is valid to avoid the 0x0 error
-            if window.width <= 0 or window.height <= 0:
-                raise ValueError(
-                    "The LCC raster does not overlap with the reference raster's extent. Please check if the data to be downloded and the raster overlap."
-                )
-
-            # 3. Define the shape and transform of this specific window
-            win_transform = ref.window_transform(window)
-            win_shape = (int(window.height), int(window.width))
-
-            # print(f"New windowed shape: {win_shape}")
-
-            # 4. Allocate only for the window
-            aligned_lcc_win = np.zeros(win_shape, dtype="uint8")
-
-            reproject(
-                source=rasterio.band(src_lcc, 1),
-                destination=aligned_lcc_win,
-                src_transform=src_lcc.transform,
-                src_crs=src_lcc.crs,
-                dst_transform=win_transform,
-                dst_crs=ref.crs,
-                resampling=Resampling.nearest,
-                src_nodata=src_lcc.nodata,
-                dst_nodata=0,
-            )
-
-    unique_types = np.unique(aligned_lcc_win)
-    unique_types = unique_types[unique_types != 0]
-
-    # We return the windowed array and the window metadata
-    # so we know WHERE this slice belongs in the big raster later.
-    return aligned_lcc_win, sorted(unique_types.tolist()), window
-
-
-def align_lcc_raster_keep_resolution(lcc_path, first_url):
+def align_lcc_raster(lcc_path, first_url, lcc_dict, shapefile_path=None):
     """
     Reprojects the LCC raster to the CRS of first_url,
     but keeps the LCC's original resolution (e.g., 20m).
     """
+    # get codes from the dict
+    if lcc_dict:
+        first_val = next(iter(lcc_dict.values()))
+        dict_codes = (
+            set(lcc_dict.values())
+            if isinstance(first_val, int)
+            else set(lcc_dict.keys())
+        )
+    else:
+        dict_codes = set()
+
     with rasterio.open(first_url) as ref:
         ref_crs = ref.crs
+        # ref_bounds = ref.bounds
+        ref_transform = ref.transform
+        ref_width, ref_height = ref.width, ref.height
 
-        with rasterio.open(lcc_path) as src_lcc:
-            # 1. Calculate the transform/shape for the new CRS while keeping resolution
-            dst_transform, dst_width, dst_height = calculate_default_transform(
-                src_lcc.crs, ref_crs, src_lcc.width, src_lcc.height, *src_lcc.bounds
+    with rasterio.open(lcc_path) as src_lcc:
+        src_res = src_lcc.res[0]
+        src_crs = src_lcc.crs
+        # --- if shapefile path is given, then use it for bounding the lcc  ---
+        if shapefile_path:
+            # Load shapefile and reproject it to the REFERENCE raster's CRS
+            gdf = gpd.read_file(shapefile_path)
+            if gdf.crs != ref_crs:
+                gdf = gdf.to_crs(ref_crs)
+
+            # Get bounds from the reprojected shapefile
+            minx, miny, maxx, maxy = gdf.total_bounds
+            # Save geometries for masking later
+            shapes = gdf.geometry.values
+        else:
+            # No shapefile: Use LCC bounds, but reproject them to Ref CRS
+            # (This handles the case where LCC and Ref have different CRS)
+            minx, miny, maxx, maxy = transform_bounds(
+                src_lcc.crs, ref_crs, *src_lcc.bounds
             )
+            shapes = None
 
-            # 2. Allocate memory based on the new shape (keeping LCC resolution)
-            win_shape = (int(dst_height), int(dst_width))
-            # Check if the window is valid to avoid the 0x0 error
-            if win_shape.width <= 0 or win_shape.height <= 0:
-                raise ValueError(
-                    "The LCC raster does not overlap with the reference raster's extent. Please check if the data to be downloded and the raster overlap."
-                )
+        # Calculate Window relative to the reference raster (first_url)
+        # This defines the "box" within the reference image's grid
+        window = from_bounds(minx, miny, maxx, maxy, transform=ref_transform)
+        window = window.round_offsets().round_lengths()
 
-            aligned_lcc_win = np.zeros(win_shape, dtype="uint8")
+        # Clip to reference dimensions to prevent out-of-bounds errors
+        ref_limit_win = rasterio.windows.Window(0, 0, ref_width, ref_height)
+        window = window.intersection(ref_limit_win)
 
-            # 3. Perform the reprojection
-            reproject(
-                source=rasterio.band(src_lcc, 1),
-                destination=aligned_lcc_win,
-                src_transform=src_lcc.transform,
-                src_crs=src_lcc.crs,
-                dst_transform=dst_transform,
-                dst_crs=ref_crs,
-                resampling=Resampling.nearest,  # Best for categorical data like LCC
-                src_nodata=src_lcc.nodata,
-                dst_nodata=0,
+        # 3. Calculate internal high-res transform for the actual data extraction
+        # We use the bounds of the window to ensure alignment
+        win_bounds = rasterio.windows.bounds(window, ref_transform)
+        w_minx, w_miny, w_maxx, w_maxy = win_bounds
+
+        dst_width = int(round((w_maxx - w_minx) / src_res))
+        dst_height = int(round((w_maxy - w_miny) / src_res))
+        dst_transform = rasterio.transform.from_origin(w_minx, w_maxy, src_res, src_res)
+
+        # Prepare output array
+        aligned_lcc_win = np.full((dst_height, dst_width), np.nan, dtype="float32")
+
+        # Reproject using the calculated transform
+        reproject(
+            source=rasterio.band(src_lcc, 1),
+            destination=aligned_lcc_win,
+            src_transform=src_lcc.transform,
+            src_crs=src_lcc.crs,
+            dst_transform=dst_transform,
+            dst_crs=ref_crs,
+            resampling=Resampling.nearest,
+            src_nodata=src_lcc.nodata,
+            dst_nodata=np.nan,
+        )
+
+        if shapes is not None:
+            mask = geometry_mask(
+                shapes,
+                out_shape=(dst_height, dst_width),
+                transform=dst_transform,
+                invert=False,
             )
+            aligned_lcc_win[mask] = np.nan
 
-            # 4. determine the geographic bounds
-            west, south, east, north = rasterio.transform.array_bounds(
-                dst_height, dst_width, dst_transform
+    # Extract unique codes (ignoring NaN)
+    #  filter out NaNs before calling unique
+    valid_data = aligned_lcc_win[~np.isnan(aligned_lcc_win)]
+    if valid_data.size > 0:
+        unique_types_array = np.unique(valid_data)
+        # Convert floats back to int for the dictionary comparison
+        unique_types_list = [int(x) for x in unique_types_array if x != 0]
+        raster_codes_set = set(unique_types_list)
+    else:
+        raster_codes_set = set()
+
+    if dict_codes:
+        # Filter: Only keep values that are present in the lcc_dict
+        final_unique_codes = raster_codes_set.intersection(dict_codes)
+        # Check for missing codes: codes in dict but NOT in raster
+        missing_in_raster = dict_codes - raster_codes_set
+        if missing_in_raster:
+            print(
+                f"Codes defined in dictionary not found in aligned raster: {missing_in_raster}"
             )
-            lcc_bounds_in_ref_crs = (west, south, east, north)
-
-    # Calculate unique classes for the stats loop
-    unique_types = np.unique(aligned_lcc_win)
-    unique_types = unique_types[unique_types != 0]
-
-    # Note: We return lcc_bounds_in_ref_crs instead of a window
-    return aligned_lcc_win, sorted(unique_types.tolist()), lcc_bounds_in_ref_crs
+        # Note: We return lcc_bounds_in_ref_crs instead of a window
+        return aligned_lcc_win, sorted(list(final_unique_codes)), window
+    else:
+        return aligned_lcc_win, sorted(list(raster_codes_set)), window
 
 
-def sample_by_lcc_raster(value_url, aligned_lcc_win, lcc_columns, window, stat="mean"):
-    """
-    Uses the 'window' parameter to read only the matching slice of the Value Raster.
-    The aligned_lcc_win is the lcc raster resample to match the value_url raster.
-    """
-    lcc_mask = aligned_lcc_win == 0
-    results = []
-
-    with rasterio.open(value_url) as src:
-        # CRITICAL: Read only the window that matches our LCC slice
-        v_data = src.read(1, window=window, masked=True)
-
-        scale = src.scales[0] if src.scales[0] is not None else 1.0
-        offset = src.offsets[0] if src.offsets[0] is not None else 0.0
-        scr_nodata = src.nodata
-
-        v_data = v_data.astype("float32")
-
-        v_data = (v_data * scale) + offset
-        # Basic check to ensure shapes match (rounding can sometimes be off by 1px)
-        # We crop the value data to match the LCC array exactly
-        v_data = v_data[: aligned_lcc_win.shape[0], : aligned_lcc_win.shape[1]]
-
-        combined_mask = v_data.mask | lcc_mask
-        v_flat = v_data.data[~combined_mask]
-        l_flat = aligned_lcc_win[~combined_mask]
-
-        for lcc_id in lcc_columns:
-            group_vals = v_flat[l_flat == lcc_id]
-
-            if group_vals.size > 0:
-                val = (
-                    np.nanmean(group_vals) if stat == "mean" else np.nanmax(group_vals)
-                )
-            else:
-                val = np.nan
-            results.append(val)
-
-    return results
-
-
-def sample_by_lcc_raster_keep_resolution(
+def sample_by_lcc_raster(
     value_url, aligned_lcc_win, lcc_columns, lcc_bounds, stat="mean"
 ):
     """
@@ -1338,9 +1334,8 @@ def sample_by_lcc_raster_keep_resolution(
     value_url
     """
     target_height, target_width = aligned_lcc_win.shape
-
     with rasterio.open(value_url) as src:
-        v_window = src.window(*lcc_bounds)
+        v_window = lcc_bounds
         # The url raster is resample to match the lcc raster
         v_data = src.read(
             1,
@@ -1378,9 +1373,26 @@ def sample_by_lcc_raster_keep_resolution(
             val = np.nan
         results.append(val)
     return results
+
+
 def get_raster_bbox(raster_path):
     with rasterio.open(raster_path) as src:
         return tuple(src.bounds)
+
+
+def normalize_unit(unit):
+    unit = unit.lower()
+    unit = unit.replace("²", "2")
+    unit = unit.replace("³", "3")
+
+    # replace separators
+    unit = unit.replace("/", "_per_")
+
+    # remove any remaining special chars except underscore
+    unit = re.sub(r"[^a-z0-9_]", "", unit)
+
+    return unit
+
 
 def wapor_dl(region, variables, period, project_foldr, data_type="raster", **kwargs):
     warnings.simplefilter(action="ignore", category=FutureWarning)
@@ -1394,7 +1406,7 @@ def wapor_dl(region, variables, period, project_foldr, data_type="raster", **kwa
     if data_type == "zonal_stat":
         # Read user input if provided, else defaults
         stat = kwargs.get("stat", "mean")  # default mean
-        polygons_col_name = kwargs.get("polygons_col_name", "block")
+        polygons_col_name = kwargs.get("polygons_col_name", "idx")
         print(f"Zonal stats on '{polygons_col_name}' using stat '{stat}'")
     elif data_type == "point":
         points_col_name = kwargs.get("points_col_name", "name")
@@ -1405,9 +1417,20 @@ def wapor_dl(region, variables, period, project_foldr, data_type="raster", **kwa
     elif data_type == "sample_by_lcc":
         stat = kwargs.get("stat", "mean")  # default mean
         lcc_raster_path = kwargs.get("lcc_raster_path", "lcc_raster_path")
-        use_lcc_resolution = kwargs.get("use_lcc_resolution", "no")
+        lcc_dict = kwargs.get("lcc_dict", None)
+        shapefile_path = kwargs.get("shapefile_path", None)
     else:
         raise ValueError(f"Unknown data_type: {data_type}")
+
+    ## Get shapefile or lcc name to use it as part of the result file name
+    if region is not None:
+        print(region)
+        fname = os.path.splitext(os.path.basename(region))[0]
+    elif data_type == "sample_by_lcc":
+        if shapefile_path is not None:
+            fname = os.path.splitext(os.path.basename(shapefile_path))[0]
+        else:
+            fname = os.path.splitext(os.path.basename(lcc_raster_path))[0]
 
     l3_code = None
     if data_type != "sample_by_lcc":
@@ -1512,29 +1535,31 @@ def wapor_dl(region, variables, period, project_foldr, data_type="raster", **kwa
                 unit = meta["unit"]
                 df = df * meta["scale"]
             else:  ## extraction per llc
-                # print("urls: ", meta["urls"])
-                if use_lcc_resolution == "yes":
-                    lcc_align_func = align_lcc_raster_keep_resolution
-                    sample_func = sample_by_lcc_raster_keep_resolution
-                else:
-                    lcc_align_func = align_lcc_raster
-                    sample_func = sample_by_lcc_raster
-
-                lcc_raster, column_labels, window = lcc_align_func(
-                    lcc_raster_path, meta["urls"][0]
+                lcc_raster, column_labels, window = align_lcc_raster(
+                    lcc_raster_path, meta["urls"][0], lcc_dict, shapefile_path
                 )
 
                 with ThreadPoolExecutor(max_workers=10) as executor:
                     lcc_group_data = list(
                         executor.map(
-                            lambda u: sample_func(
-                                u, lcc_raster, column_labels, window, stat="mean"
+                            lambda u: sample_by_lcc_raster(
+                                u,
+                                lcc_raster,
+                                column_labels,
+                                window,
+                                stat="mean",
                             ),
                             meta["urls"],
                         )
                     )
+                if lcc_dict:
+                    df_columns = [
+                        name for name, code in lcc_dict.items() if code in column_labels
+                    ]
+                else:
+                    df_columns = column_labels
 
-                df = pd.DataFrame(lcc_group_data, columns=column_labels, index=time_rst)
+                df = pd.DataFrame(lcc_group_data, columns=df_columns, index=time_rst)
                 unit = meta["unit"]
             # Apply dekadal days multiplier if frequency is dekadal
             if meta["frq"] == "dekadal":
@@ -1552,7 +1577,7 @@ def wapor_dl(region, variables, period, project_foldr, data_type="raster", **kwa
             df = df.round(2)
             # 4. Save to CSV
             csv_path = os.path.join(
-                csv_dir, f"{variable}_{unit.replace('/', '_per_')}.csv"
+                csv_dir, f"{fname}_{variable}_{normalize_unit(unit)}.csv"
             )
             # print(csv_path)
             df.to_csv(csv_path)
@@ -1594,6 +1619,11 @@ if __name__ == "__main__":
     if data_type == "sample_by_lcc":
         stat = "mean"  # possible stats inclyde max,
         lcc_raster_path = r"d:\modules\RS4AWM\2026\download_wapor_for_IPA\data\ESA_LC_2021_Erbil_20m.tif"
+        shapefile_path = r"d:\WaPOR_phase2\OCWs\WaPOR_for_Global_Challenges\WaPOR4GC\data\shp\Shammamuk.geojson"
+        lcc_dict = {
+            "Grassland": 30,
+            "Cropland": 40,
+        }
         wapor_dl(
             region,
             products,
@@ -1602,7 +1632,8 @@ if __name__ == "__main__":
             data_type=data_type,
             stat=stat,
             lcc_raster_path=lcc_raster_path,
-            use_lcc_resolution="no",  # if yes, the data will be resampled to mach the lcc raster
+            lcc_dict=lcc_dict,
+            shapefile_path=shapefile_path,
         )
 
     if data_type == "zonal_stat":
