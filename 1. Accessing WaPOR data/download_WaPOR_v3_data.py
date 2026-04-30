@@ -1040,57 +1040,67 @@ def sample_url_worker(url, pts_coords):
 
 def sample_url_worker_polygon(url, polygons, stat="mean"):
     """
-    Optimized for Dask using rioxarray. 
-    Maintains fallback logic for polygons smaller than a pixel.
+    Robust polygon sampling with fallback for very small polygons.
     """
     results = []
-    
+
     try:
-        # 1. Open the dataset lazily. 
-        # chunks={} forces the use of Dask without specifying exact sizes.
-        ds = rio.open_rasterio(url, chunks=True, mask_and_scale=True)
-        
-        # Determine resolution once
-        res_x = abs(ds.rio.transform()[0])
-        res_y = abs(ds.rio.transform()[4])
+        with rasterio.open(url) as src:
+            res_x, res_y = src.res  # pixel size
 
-        for poly in polygons:
-            bounds = poly.bounds
-            minx, miny, maxx, maxy = bounds
+            for poly in polygons:
+                bounds = poly.bounds
+                minx, miny, maxx, maxy = bounds
 
-            # Check if polygon is smaller than a pixel
-            if (maxx - minx) < res_x or (maxy - miny) < res_y:
-                # Use sel with method='nearest' to get the centroid pixel value
-                val = ds.sel(x=poly.centroid.x, y=poly.centroid.y, method="nearest")
-                results.append(float(val.values.flatten()[0]))
-                continue
+                # Check if polygon is smaller than a pixel
+                if (maxx - minx) < res_x or (maxy - miny) < res_y:
+                    # Use centroid pixel directly
+                    row, col = src.index(poly.centroid.x, poly.centroid.y)
+                    val = src.read(1)[row, col]
+                    results.append(val)
+                    continue
 
-            try:
-                # 2. Use rioxarray's clip for normal polygons
-                # all_touched=True ensures we don't get empty results for edge cases
-                clipped = ds.rio.clip([mapping(poly)], all_touched=True)
-                
-                # Compute the required statistic
+                # Normal windowed read
+                window = from_bounds(minx, miny, maxx, maxy, transform=src.transform)
+                window = window.round_offsets().round_lengths()
+
+                # Ensure valid window
+                if window.width <= 0 or window.height <= 0:
+                    row, col = src.index(poly.centroid.x, poly.centroid.y)
+                    val = src.read(1)[row, col]
+                    results.append(val)
+                    continue
+
+                data = src.read(1, window=window, masked=True)
+                transform = src.window_transform(window)
+
+                mask = geometry_mask(
+                    [poly],
+                    transform=transform,
+                    invert=True,
+                    out_shape=data.shape,
+                    # all_touched=True,
+                )
+                vals = data[mask]
+
+                # If still empty, fallback to centroid
+                if vals.size == 0:
+                    row, col = src.index(poly.centroid.x, poly.centroid.y)
+                    vals = np.array([src.read(1)[row, col]])
+
+                # Compute statistic
                 if stat == "mean":
-                    val = clipped.mean()
-                elif stat == "max":
-                    val = clipped.max()
-                elif stat == "min":
-                    val = clipped.min()
+                    results.append(np.nanmean(vals))
                 elif stat == "sum":
-                    val = clipped.sum()
+                    results.append(np.nansum(vals))
+                elif stat == "min":
+                    results.append(np.nanmin(vals))
+                elif stat == "max":
+                    results.append(np.nanmax(vals))
                 elif stat == "median":
-                    val = clipped.median()
+                    results.append(np.nanmedian(vals))
                 else:
-                    raise ValueError(f"Unsupported statistic: {stat}")
-                
-                # Trigger computation for this small subset only
-                results.append(float(val.compute().values.flatten()[0]))
-                
-            except Exception:
-                # Final fallback to centroid if clipping fails or is empty
-                val = ds.sel(x=poly.centroid.x, y=poly.centroid.y, method="nearest")
-                results.append(float(val.values.flatten()[0]))
+                    raise ValueError("Unsupported statistic")
 
         return results
 
@@ -1100,10 +1110,21 @@ def sample_url_worker_polygon(url, polygons, stat="mean"):
 
 
 def process_raster_layers(
-    meta, time_rst, shape, template, nc_dir, variable, xmin, ymin, xmax, ymax, crs
+    meta,
+    time_rst,
+    shape,
+    template,
+    nc_dir,
+    variable,
+    xmin,
+    ymin,
+    xmax,
+    ymax,
+    crs,
+    fname,
 ):
     """Downloads, clips, scales, and saves raster data to a NetCDF file."""
-    nc_path = os.path.join(nc_dir, f"{variable}.nc")
+    nc_path = os.path.join(nc_dir, f"{fname}_{variable}.nc")
 
     # Initialize NetCDF if it doesn't exist
     if not os.path.exists(nc_path):
@@ -1204,6 +1225,107 @@ def prepare_polygon_for_zonal_stat(shape, polygons_col_name, first_url, crs, var
 
 
 def align_lcc_raster(lcc_path, first_url, lcc_dict, shapefile_path=None):
+    """
+    Reprojects the LCC raster to the CRS of first_url,
+    keeps original LCC resolution, and returns spatial metadata for Dask.
+    """
+    # 1. Resolve Dictionary Codes
+    if lcc_dict:
+        first_val = next(iter(lcc_dict.values()))
+        dict_codes = (
+            set(lcc_dict.values())
+            if isinstance(first_val, int)
+            else set(lcc_dict.keys())
+        )
+    else:
+        dict_codes = set()
+
+    with rasterio.open(first_url) as ref:
+        ref_crs = ref.crs
+        ref_transform = ref.transform
+        ref_width, ref_height = ref.width, ref.height
+
+    with rasterio.open(lcc_path) as src_lcc:
+        src_res = src_lcc.res[0]
+
+        # Determine Bounding Box in Reference CRS
+        if shapefile_path:
+            gdf = gpd.read_file(shapefile_path)
+            if gdf.crs != ref_crs:
+                gdf = gdf.to_crs(ref_crs)
+            minx, miny, maxx, maxy = gdf.total_bounds
+            shapes = gdf.geometry.values
+        else:
+            minx, miny, maxx, maxy = transform_bounds(
+                src_lcc.crs, ref_crs, *src_lcc.bounds
+            )
+            shapes = None
+
+        # Calculate Window relative to first_url grid
+        window = from_bounds(minx, miny, maxx, maxy, transform=ref_transform)
+        window = window.round_offsets().round_lengths()
+
+        # Intersection to stay within first_url extents
+        ref_limit_win = rasterio.windows.Window(0, 0, ref_width, ref_height)
+        window = window.intersection(ref_limit_win)
+
+        # 2. Calculate Destination High-Res Transform (LCC Resolution)
+        win_bounds = rasterio.windows.bounds(window, ref_transform)
+        w_minx, w_miny, w_maxx, w_maxy = win_bounds
+
+        dst_width = int(round((w_maxx - w_minx) / src_res))
+        dst_height = int(round((w_maxy - w_miny) / src_res))
+        dst_transform = rasterio.transform.from_origin(w_minx, w_maxy, src_res, src_res)
+        dst_crs = ref_crs  # We are aligning to reference CRS
+
+        # Prepare and Reproject
+        aligned_lcc_win = np.full((dst_height, dst_width), np.nan, dtype="float32")
+
+        reproject(
+            source=rasterio.band(src_lcc, 1),
+            destination=aligned_lcc_win,
+            src_transform=src_lcc.transform,
+            src_crs=src_lcc.crs,
+            dst_transform=dst_transform,
+            dst_crs=dst_crs,
+            resampling=Resampling.nearest,
+            src_nodata=src_lcc.nodata,
+            dst_nodata=np.nan,
+        )
+
+        if shapes is not None:
+            mask = geometry_mask(
+                shapes,
+                out_shape=(dst_height, dst_width),
+                transform=dst_transform,
+                invert=False,
+            )
+            aligned_lcc_win[mask] = np.nan
+
+    # 3. Code Filtering
+    valid_data = aligned_lcc_win[~np.isnan(aligned_lcc_win)]
+    raster_codes_set = (
+        set(int(x) for x in np.unique(valid_data) if x != 0)
+        if valid_data.size > 0
+        else set()
+    )
+
+    if dict_codes:
+        final_unique_codes = sorted(list(raster_codes_set.intersection(dict_codes)))
+        missing = dict_codes - raster_codes_set
+        if missing:
+            print(f"Codes in dict not in raster: {missing}")
+    else:
+        final_unique_codes = sorted(list(raster_codes_set))
+
+    # print("window: ", window)
+    # print("win_bounds: ", win_bounds)
+
+    # RETURN: The data, the codes, the window, the transform, and the CRS
+    return aligned_lcc_win, final_unique_codes, win_bounds, dst_transform, dst_crs
+
+
+def align_lcc_raster2(lcc_path, first_url, lcc_dict, shapefile_path=None):
     """
     Reprojects the LCC raster to the CRS of first_url,
     but keeps the LCC's original resolution (e.g., 20m).
@@ -1317,6 +1439,102 @@ def align_lcc_raster(lcc_path, first_url, lcc_dict, shapefile_path=None):
 
 
 def sample_by_lcc_raster(
+    value_url,
+    aligned_lcc_win,
+    lcc_columns,
+    lcc_bounds,
+    lcc_transform,
+    lcc_crs,
+    stat="mean",
+):
+
+    # print("lcc_bounds: ", lcc_bounds)
+    # print("lcc_transform: ", lcc_transform)
+    # print("Here: aligned_lcc_win: ", aligned_lcc_win)
+    try:
+        v_ds = rio.open_rasterio(value_url, chunks="auto", mask_and_scale=True)
+        # --- Detect single-pixel case early ---
+        # --- Handle degenerate grids (1D or 1 pixel) ---
+        if aligned_lcc_win.shape[0] < 2 or aligned_lcc_win.shape[1] < 2:
+            left, bottom, right, top = lcc_bounds
+            # center point
+            x = (left + right) / 2
+            y = (bottom + top) / 2
+
+            # reproject point if needed
+            if lcc_crs != v_ds.rio.crs:
+                xs, ys = transform_bounds(lcc_crs, v_ds.rio.crs, x, y, x, y)
+                x, y = xs, ys
+
+            # sample safely using rasterio backend
+            val = list(v_ds.rio.sample([(x, y)]))[0][0]
+
+            results = []
+            for lcc_id in lcc_columns:
+                if np.any(aligned_lcc_win == lcc_id):
+                    results.append(val)
+                else:
+                    results.append(np.nan)
+
+            return results
+
+        # --- Normal case (multi-pixel) ---
+        left, bottom, right, top = lcc_bounds
+        try:
+            v_clipped = v_ds.rio.clip_box(minx=left, miny=bottom, maxx=right, maxy=top)
+        except Exception:
+            # 2. Fallback: Use resolution-aware padding
+            res_x, res_y = v_ds.rio.resolution()
+            pad_x, pad_y = abs(res_x) * 1, abs(res_y) * 1
+
+            v_clipped = v_ds.rio.clip_box(
+                minx=left - pad_x,
+                miny=bottom - pad_y,
+                maxx=right + pad_x,
+                maxy=top + pad_y,
+            )
+
+        lcc_template = (
+            xr.DataArray(aligned_lcc_win, dims=("y", "x"))
+            .rio.write_transform(lcc_transform)
+            .rio.write_crs(lcc_crs)
+        )
+
+        v_aligned = v_clipped.rio.reproject_match(lcc_template)
+
+        if "band" in v_aligned.dims:
+            v_aligned = v_aligned.sel(band=1)
+
+        v_numeric = v_aligned.compute().values
+
+        lcc_invalid = (aligned_lcc_win == 0) | (aligned_lcc_win == 255)
+
+        results = []
+        for lcc_id in lcc_columns:
+            mask = (aligned_lcc_win == lcc_id) & (~np.isnan(v_numeric)) & (~lcc_invalid)
+
+            group_vals = v_numeric[mask]
+
+            if group_vals.size > 0:
+                if stat == "mean":
+                    val = np.nanmean(group_vals)
+                elif stat == "max":
+                    val = np.nanmax(group_vals)
+                else:
+                    val = np.nan
+            else:
+                val = np.nan
+
+            results.append(val)
+
+        return results
+
+    except Exception as e:
+        print(f"LCC Sampling failed for {value_url}: {e}")
+        return [np.nan] * len(lcc_columns)
+
+
+def sample_by_lcc_raster2(
     value_url, aligned_lcc_win, lcc_columns, lcc_bounds, stat="mean"
 ):
     """
@@ -1479,6 +1697,7 @@ def wapor_dl(region, variables, period, project_foldr, data_type="raster", **kwa
                 xmax,
                 ymax,
                 crs,
+                fname,
             )
 
         else:
@@ -1525,8 +1744,10 @@ def wapor_dl(region, variables, period, project_foldr, data_type="raster", **kwa
                 unit = meta["unit"]
                 df = df * meta["scale"]
             else:  ## extraction per llc
-                lcc_raster, column_labels, window = align_lcc_raster(
-                    lcc_raster_path, meta["urls"][0], lcc_dict, shapefile_path
+                lcc_raster, column_labels, window, lcc_transform, lcc_crs = (
+                    align_lcc_raster(
+                        lcc_raster_path, meta["urls"][0], lcc_dict, shapefile_path
+                    )
                 )
 
                 with ThreadPoolExecutor(max_workers=10) as executor:
@@ -1537,6 +1758,8 @@ def wapor_dl(region, variables, period, project_foldr, data_type="raster", **kwa
                                 lcc_raster,
                                 column_labels,
                                 window,
+                                lcc_transform,
+                                lcc_crs,
                                 stat="mean",
                             ),
                             meta["urls"],
