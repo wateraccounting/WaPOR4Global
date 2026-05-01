@@ -10,6 +10,7 @@ for any bug please contact @ sd.seyoum7@gmail.com.
 """
 
 # import osgeo
+import gc
 import glob
 import multiprocessing as mp
 import os
@@ -33,8 +34,13 @@ from dask.distributed import Client, LocalCluster, get_client
 from dateutil import parser
 from osgeo import gdal
 from rasterio.features import geometry_mask
-from rasterio.warp import Resampling, reproject, transform_bounds
-from rasterio.windows import from_bounds
+from rasterio.warp import (
+    Resampling,
+    calculate_default_transform,
+    reproject,
+    transform_bounds,
+)
+from rasterio.windows import Window, from_bounds
 from shapely.geometry import box
 
 # Constants
@@ -944,6 +950,12 @@ def setup_wapor_directories(project_foldr):
     return nc_dir, csv_dir
 
 
+def setup_directory(project_foldr, area_folder, var_type):
+    dir_path = os.path.join(project_foldr, area_folder, var_type)
+    os.makedirs(dir_path, exist_ok=True)
+    return dir_path
+
+
 def get_adjusted_period(variable, period, last_time_dict, shape, nc_dir, data_type):
     """Calculates the start date based on existing NetCDF files."""
     from pandas.tseries.offsets import DateOffset, MonthEnd
@@ -1039,74 +1051,77 @@ def sample_url_worker(url, pts_coords):
 
 
 def sample_url_worker_polygon(url, polygons, stat="mean"):
-    """
-    Robust polygon sampling with fallback for very small polygons.
-    """
     results = []
-
+    # Setting sharing=False is critical for ThreadPoolExecutor to prevent
+    # different threads from interfering with the same file handle
     try:
-        with rasterio.open(url) as src:
-            res_x, res_y = src.res  # pixel size
+        with rasterio.Env(
+            GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR",
+            GDAL_HTTP_MERGE_CONSECUTIVE_RANGES="YES",
+        ):
+            with rasterio.open(url, sharing=False) as src:
+                res_x, res_y = src.res
 
-            for poly in polygons:
-                bounds = poly.bounds
-                minx, miny, maxx, maxy = bounds
+                for poly in polygons:
+                    if poly is None or poly.is_empty:
+                        results.append(np.nan)
+                        continue
 
-                # Check if polygon is smaller than a pixel
-                if (maxx - minx) < res_x or (maxy - miny) < res_y:
-                    # Use centroid pixel directly
-                    row, col = src.index(poly.centroid.x, poly.centroid.y)
-                    val = src.read(1)[row, col]
-                    results.append(val)
-                    continue
+                    bounds = poly.bounds
+                    # Fallback for tiny polygons: Read only 1x1 window
+                    if (bounds[2] - bounds[0]) < res_x or (
+                        bounds[3] - bounds[1]
+                    ) < res_y:
+                        row, col = src.index(poly.centroid.x, poly.centroid.y)
+                        # CRITICAL: Read only a tiny window, NOT src.read(1)
+                        win = ((row, row + 1), (col, col + 1))
+                        val = src.read(1, window=win)[0, 0]
+                        results.append(val)
+                        continue
 
-                # Normal windowed read
-                window = from_bounds(minx, miny, maxx, maxy, transform=src.transform)
-                window = window.round_offsets().round_lengths()
+                    # Windowed read for normal polygons
+                    window = from_bounds(*bounds, transform=src.transform)
+                    window = window.round_offsets().round_lengths()
 
-                # Ensure valid window
-                if window.width <= 0 or window.height <= 0:
-                    row, col = src.index(poly.centroid.x, poly.centroid.y)
-                    val = src.read(1)[row, col]
-                    results.append(val)
-                    continue
+                    # Read only the data in the window
+                    data = src.read(1, window=window, masked=True)
+                    win_transform = src.window_transform(window)
 
-                data = src.read(1, window=window, masked=True)
-                transform = src.window_transform(window)
+                    mask = geometry_mask(
+                        [poly],
+                        transform=win_transform,
+                        invert=True,
+                        out_shape=data.shape,
+                    )
+                    vals = data[mask]
 
-                mask = geometry_mask(
-                    [poly],
-                    transform=transform,
-                    invert=True,
-                    out_shape=data.shape,
-                    # all_touched=True,
-                )
-                vals = data[mask]
+                    if vals.size == 0:
+                        row, col = src.index(poly.centroid.x, poly.centroid.y)
+                        vals = src.read(
+                            1, window=((row, row + 1), (col, col + 1))
+                        ).flatten()
 
-                # If still empty, fallback to centroid
-                if vals.size == 0:
-                    row, col = src.index(poly.centroid.x, poly.centroid.y)
-                    vals = np.array([src.read(1)[row, col]])
-
-                # Compute statistic
-                if stat == "mean":
-                    results.append(np.nanmean(vals))
-                elif stat == "sum":
-                    results.append(np.nansum(vals))
-                elif stat == "min":
-                    results.append(np.nanmin(vals))
-                elif stat == "max":
-                    results.append(np.nanmax(vals))
-                elif stat == "median":
-                    results.append(np.nanmedian(vals))
-                else:
-                    raise ValueError("Unsupported statistic")
+                    # Stat logic
+                    # Compute statistic
+                    if stat == "mean":
+                        results.append(np.nanmean(vals))
+                    elif stat == "sum":
+                        results.append(np.nansum(vals))
+                    elif stat == "min":
+                        results.append(np.nanmin(vals))
+                    elif stat == "max":
+                        results.append(np.nanmax(vals))
+                    elif stat == "median":
+                        results.append(np.nanmedian(vals))
+                    else:
+                        raise ValueError("Unsupported statistic")
 
         return results
-
     except Exception as e:
-        print(f"Sampling failed for {url}: {e}")
+        print(f"Worker failed for {url}: {e}")
         return [np.nan] * len(polygons)
+    finally:
+        gc.collect()
 
 
 def process_raster_layers(
@@ -1121,10 +1136,9 @@ def process_raster_layers(
     xmax,
     ymax,
     crs,
-    fname,
 ):
     """Downloads, clips, scales, and saves raster data to a NetCDF file."""
-    nc_path = os.path.join(nc_dir, f"{fname}_{variable}.nc")
+    nc_path = os.path.join(nc_dir, f"{variable}.nc")
 
     # Initialize NetCDF if it doesn't exist
     if not os.path.exists(nc_path):
@@ -1179,8 +1193,11 @@ def prepare_point_extraction(shape, points_col_name, first_url, crs, variable):
         return None, None
 
     # Handle naming/labeling
-    if points_col_name in subset_gdf.columns.str.lower():
-        column_label = subset_gdf.name.to_list()
+    found_col = next(
+        (c for c in subset_gdf.columns if c.lower() == points_col_name.lower()), None
+    )
+    if found_col:
+        column_label = subset_gdf[found_col].to_list()
     else:
         column_label = subset_gdf.index.to_list()
 
@@ -1211,9 +1228,13 @@ def prepare_polygon_for_zonal_stat(shape, polygons_col_name, first_url, crs, var
         return None, None
 
     # Handle naming/labeling
-    subset_gdf.columns = subset_gdf.columns.str.lower()
-    if polygons_col_name.lower() in subset_gdf.columns.str.lower():
-        column_label = subset_gdf[polygons_col_name].to_list()
+
+    found_col = next(
+        (col for col in subset_gdf.columns if col.lower() == polygons_col_name.lower()),
+        None,
+    )
+    if found_col:
+        column_label = subset_gdf[found_col].to_list()
     else:
         print(
             f"The {polygons_col_name} is not found in the shapefile columns. Uisng index."
@@ -1227,7 +1248,7 @@ def prepare_polygon_for_zonal_stat(shape, polygons_col_name, first_url, crs, var
 def align_lcc_raster(lcc_path, first_url, lcc_dict, shapefile_path=None):
     """
     Reprojects the LCC raster to the CRS of first_url,
-    keeps original LCC resolution, and returns spatial metadata for Dask.
+    keeps original LCC resolution, and ensures proper spatial intersection.
     """
     # 1. Resolve Dictionary Codes
     if lcc_dict:
@@ -1242,161 +1263,59 @@ def align_lcc_raster(lcc_path, first_url, lcc_dict, shapefile_path=None):
 
     with rasterio.open(first_url) as ref:
         ref_crs = ref.crs
-        ref_transform = ref.transform
-        ref_width, ref_height = ref.width, ref.height
+        ref_bounds = ref.bounds
 
     with rasterio.open(lcc_path) as src_lcc:
         src_res = src_lcc.res[0]
 
-        # Determine Bounding Box in Reference CRS
+        # Calculate the transform and dimensions needed to reproject LCC to Ref CRS
+        # We manually pass resolution=src_res to keep the LCC resolution
+        dst_transform, dst_width, dst_height = calculate_default_transform(
+            src_lcc.crs,
+            ref_crs,
+            src_lcc.width,
+            src_lcc.height,
+            *src_lcc.bounds,
+            resolution=src_res,
+        )
+
+        # 2. Determine Intersecting Bounding Box
         if shapefile_path:
             gdf = gpd.read_file(shapefile_path)
             if gdf.crs != ref_crs:
                 gdf = gdf.to_crs(ref_crs)
+            # Clip bounds to the shapefile area
             minx, miny, maxx, maxy = gdf.total_bounds
             shapes = gdf.geometry.values
         else:
-            minx, miny, maxx, maxy = transform_bounds(
+            # Check intersection between reprojected LCC bounds and Reference bounds
+            lcc_reprojected_bounds = transform_bounds(
                 src_lcc.crs, ref_crs, *src_lcc.bounds
             )
+            minx = max(lcc_reprojected_bounds[0], ref_bounds[0])
+            miny = max(lcc_reprojected_bounds[1], ref_bounds[1])
+            maxx = min(lcc_reprojected_bounds[2], ref_bounds[2])
+            maxy = min(lcc_reprojected_bounds[3], ref_bounds[3])
             shapes = None
 
-        # Calculate Window relative to first_url grid
-        window = from_bounds(minx, miny, maxx, maxy, transform=ref_transform)
-        window = window.round_offsets().round_lengths()
+        if minx >= maxx or miny >= maxy:
+            print(f"Warning: No intersection between {lcc_path} and reference grid.")
+            return np.array([]), [], (0, 0, 0, 0), None, ref_crs
 
-        # Intersection to stay within first_url extents
-        ref_limit_win = rasterio.windows.Window(0, 0, ref_width, ref_height)
-        window = window.intersection(ref_limit_win)
-
-        # 2. Calculate Destination High-Res Transform (LCC Resolution)
-        win_bounds = rasterio.windows.bounds(window, ref_transform)
-        w_minx, w_miny, w_maxx, w_maxy = win_bounds
-
-        dst_width = int(round((w_maxx - w_minx) / src_res))
-        dst_height = int(round((w_maxy - w_miny) / src_res))
-        dst_transform = rasterio.transform.from_origin(w_minx, w_maxy, src_res, src_res)
-        dst_crs = ref_crs  # We are aligning to reference CRS
+        # 3. Refine dimensions based on the intersection area at LCC resolution
+        final_width = int(round((maxx - minx) / src_res))
+        final_height = int(round((maxy - miny) / src_res))
+        final_transform = rasterio.transform.from_origin(minx, maxy, src_res, src_res)
 
         # Prepare and Reproject
-        aligned_lcc_win = np.full((dst_height, dst_width), np.nan, dtype="float32")
+        aligned_lcc_win = np.full((final_height, final_width), np.nan, dtype="float32")
 
         reproject(
             source=rasterio.band(src_lcc, 1),
             destination=aligned_lcc_win,
             src_transform=src_lcc.transform,
             src_crs=src_lcc.crs,
-            dst_transform=dst_transform,
-            dst_crs=dst_crs,
-            resampling=Resampling.nearest,
-            src_nodata=src_lcc.nodata,
-            dst_nodata=np.nan,
-        )
-
-        if shapes is not None:
-            mask = geometry_mask(
-                shapes,
-                out_shape=(dst_height, dst_width),
-                transform=dst_transform,
-                invert=False,
-            )
-            aligned_lcc_win[mask] = np.nan
-
-    # 3. Code Filtering
-    valid_data = aligned_lcc_win[~np.isnan(aligned_lcc_win)]
-    raster_codes_set = (
-        set(int(x) for x in np.unique(valid_data) if x != 0)
-        if valid_data.size > 0
-        else set()
-    )
-
-    if dict_codes:
-        final_unique_codes = sorted(list(raster_codes_set.intersection(dict_codes)))
-        missing = dict_codes - raster_codes_set
-        if missing:
-            print(f"Codes in dict not in raster: {missing}")
-    else:
-        final_unique_codes = sorted(list(raster_codes_set))
-
-    # print("window: ", window)
-    # print("win_bounds: ", win_bounds)
-
-    # RETURN: The data, the codes, the window, the transform, and the CRS
-    return aligned_lcc_win, final_unique_codes, win_bounds, dst_transform, dst_crs
-
-
-def align_lcc_raster2(lcc_path, first_url, lcc_dict, shapefile_path=None):
-    """
-    Reprojects the LCC raster to the CRS of first_url,
-    but keeps the LCC's original resolution (e.g., 20m).
-    """
-    # get codes from the dict
-    if lcc_dict:
-        first_val = next(iter(lcc_dict.values()))
-        dict_codes = (
-            set(lcc_dict.values())
-            if isinstance(first_val, int)
-            else set(lcc_dict.keys())
-        )
-    else:
-        dict_codes = set()
-
-    with rasterio.open(first_url) as ref:
-        ref_crs = ref.crs
-        # ref_bounds = ref.bounds
-        ref_transform = ref.transform
-        ref_width, ref_height = ref.width, ref.height
-
-    with rasterio.open(lcc_path) as src_lcc:
-        src_res = src_lcc.res[0]
-        src_crs = src_lcc.crs
-        # --- if shapefile path is given, then use it for bounding the lcc  ---
-        if shapefile_path:
-            # Load shapefile and reproject it to the REFERENCE raster's CRS
-            gdf = gpd.read_file(shapefile_path)
-            if gdf.crs != ref_crs:
-                gdf = gdf.to_crs(ref_crs)
-
-            # Get bounds from the reprojected shapefile
-            minx, miny, maxx, maxy = gdf.total_bounds
-            # Save geometries for masking later
-            shapes = gdf.geometry.values
-        else:
-            # No shapefile: Use LCC bounds, but reproject them to Ref CRS
-            # (This handles the case where LCC and Ref have different CRS)
-            minx, miny, maxx, maxy = transform_bounds(
-                src_lcc.crs, ref_crs, *src_lcc.bounds
-            )
-            shapes = None
-
-        # Calculate Window relative to the reference raster (first_url)
-        # This defines the "box" within the reference image's grid
-        window = from_bounds(minx, miny, maxx, maxy, transform=ref_transform)
-        window = window.round_offsets().round_lengths()
-
-        # Clip to reference dimensions to prevent out-of-bounds errors
-        ref_limit_win = rasterio.windows.Window(0, 0, ref_width, ref_height)
-        window = window.intersection(ref_limit_win)
-
-        # 3. Calculate internal high-res transform for the actual data extraction
-        # We use the bounds of the window to ensure alignment
-        win_bounds = rasterio.windows.bounds(window, ref_transform)
-        w_minx, w_miny, w_maxx, w_maxy = win_bounds
-
-        dst_width = int(round((w_maxx - w_minx) / src_res))
-        dst_height = int(round((w_maxy - w_miny) / src_res))
-        dst_transform = rasterio.transform.from_origin(w_minx, w_maxy, src_res, src_res)
-
-        # Prepare output array
-        aligned_lcc_win = np.full((dst_height, dst_width), np.nan, dtype="float32")
-
-        # Reproject using the calculated transform
-        reproject(
-            source=rasterio.band(src_lcc, 1),
-            destination=aligned_lcc_win,
-            src_transform=src_lcc.transform,
-            src_crs=src_lcc.crs,
-            dst_transform=dst_transform,
+            dst_transform=final_transform,
             dst_crs=ref_crs,
             resampling=Resampling.nearest,
             src_nodata=src_lcc.nodata,
@@ -1406,36 +1325,27 @@ def align_lcc_raster2(lcc_path, first_url, lcc_dict, shapefile_path=None):
         if shapes is not None:
             mask = geometry_mask(
                 shapes,
-                out_shape=(dst_height, dst_width),
-                transform=dst_transform,
+                out_shape=(final_height, final_width),
+                transform=final_transform,
                 invert=False,
             )
             aligned_lcc_win[mask] = np.nan
 
-    # Extract unique codes (ignoring NaN)
-    #  filter out NaNs before calling unique
+    # 4. Code Filtering
     valid_data = aligned_lcc_win[~np.isnan(aligned_lcc_win)]
-    if valid_data.size > 0:
-        unique_types_array = np.unique(valid_data)
-        # Convert floats back to int for the dictionary comparison
-        unique_types_list = [int(x) for x in unique_types_array if x != 0]
-        raster_codes_set = set(unique_types_list)
-    else:
-        raster_codes_set = set()
+    raster_codes_set = (
+        set(int(x) for x in np.unique(valid_data) if x != 0)
+        if valid_data.size > 0
+        else set()
+    )
 
     if dict_codes:
-        # Filter: Only keep values that are present in the lcc_dict
-        final_unique_codes = raster_codes_set.intersection(dict_codes)
-        # Check for missing codes: codes in dict but NOT in raster
-        missing_in_raster = dict_codes - raster_codes_set
-        if missing_in_raster:
-            print(
-                f"Codes defined in dictionary not found in aligned raster: {missing_in_raster}"
-            )
-        # Note: We return lcc_bounds_in_ref_crs instead of a window
-        return aligned_lcc_win, sorted(list(final_unique_codes)), window
+        final_unique_codes = sorted(list(raster_codes_set.intersection(dict_codes)))
     else:
-        return aligned_lcc_win, sorted(list(raster_codes_set)), window
+        final_unique_codes = sorted(list(raster_codes_set))
+
+    win_bounds = (minx, miny, maxx, maxy)
+    return aligned_lcc_win, final_unique_codes, win_bounds, final_transform, ref_crs
 
 
 def sample_by_lcc_raster(
@@ -1447,140 +1357,93 @@ def sample_by_lcc_raster(
     lcc_crs,
     stat="mean",
 ):
-
-    # print("lcc_bounds: ", lcc_bounds)
-    # print("lcc_transform: ", lcc_transform)
-    # print("Here: aligned_lcc_win: ", aligned_lcc_win)
     try:
-        v_ds = rio.open_rasterio(value_url, chunks="auto", mask_and_scale=True)
-        # --- Detect single-pixel case early ---
-        # --- Handle degenerate grids (1D or 1 pixel) ---
-        if aligned_lcc_win.shape[0] < 2 or aligned_lcc_win.shape[1] < 2:
+        with rasterio.open(value_url) as src:
+            # 1. Capture Metadata for "mask_and_scale"
+            scale = src.scales[0] if src.scales[0] is not None else 1.0
+            offset = src.offsets[0] if src.offsets[0] is not None else 0.0
+            nodata = src.nodata
+
             left, bottom, right, top = lcc_bounds
-            # center point
-            x = (left + right) / 2
-            y = (bottom + top) / 2
+            ds_transform = src.transform
 
-            # reproject point if needed
-            if lcc_crs != v_ds.rio.crs:
-                xs, ys = transform_bounds(lcc_crs, v_ds.rio.crs, x, y, x, y)
-                x, y = xs, ys
+            window = from_bounds(left, bottom, right, top, transform=ds_transform)
 
-            # sample safely using rasterio backend
-            val = list(v_ds.rio.sample([(x, y)]))[0][0]
+            if window.width < 1 or window.height < 1:
+                cx, cy = (left + right) / 2, (bottom + top) / 2
+                inv_transform = ~ds_transform
+                col_idx, row_idx = [int(np.floor(v)) for v in inv_transform * (cx, cy)]
+                window = Window(col_idx, row_idx, 1, 1)
+            else:
+                window = window.round_offsets().round_lengths()
 
-            results = []
-            for lcc_id in lcc_columns:
-                if np.any(aligned_lcc_win == lcc_id):
-                    results.append(val)
-                else:
-                    results.append(np.nan)
+            # Clip to Raster Extent
+            ref_limit_win = Window(0, 0, src.width, src.height)
+            try:
+                window = window.intersection(ref_limit_win)
+            except rasterio.errors.WindowError:
+                return [np.nan] * len(lcc_columns)
 
-            return results
+            if window.width <= 0 or window.height <= 0:
+                return [np.nan] * len(lcc_columns)
 
-        # --- Normal case (multi-pixel) ---
-        left, bottom, right, top = lcc_bounds
-        try:
-            v_clipped = v_ds.rio.clip_box(minx=left, miny=bottom, maxx=right, maxy=top)
-        except Exception:
-            # 2. Fallback: Use resolution-aware padding
-            res_x, res_y = v_ds.rio.resolution()
-            pad_x, pad_y = abs(res_x) * 1, abs(res_y) * 1
+            # 3. Read and Scale (The "rioxarray" way)
+            # Read only the window needed to save bandwidth in Colab
+            v_raw = src.read(1, window=window)
+            v_transform = src.window_transform(window)
 
-            v_clipped = v_ds.rio.clip_box(
-                minx=left - pad_x,
-                miny=bottom - pad_y,
-                maxx=right + pad_x,
-                maxy=top + pad_y,
+            # Create mask for NoData before converting to float
+            mask = (
+                (v_raw == nodata)
+                if nodata is not None
+                else np.zeros_like(v_raw, dtype=bool)
             )
 
-        lcc_template = (
-            xr.DataArray(aligned_lcc_win, dims=("y", "x"))
-            .rio.write_transform(lcc_transform)
-            .rio.write_crs(lcc_crs)
-        )
+            # Apply Scale and Offset (this makes values "correct")
+            v_numeric = v_raw.astype(np.float32)
+            v_numeric[mask] = np.nan
+            v_numeric = (v_numeric * scale) + offset
 
-        v_aligned = v_clipped.rio.reproject_match(lcc_template)
+            # 4. Alignment via Warp (Faster than reproject_match)
+            v_aligned = np.full(aligned_lcc_win.shape, np.nan, dtype=np.float32)
 
-        if "band" in v_aligned.dims:
-            v_aligned = v_aligned.sel(band=1)
+            reproject(
+                source=v_numeric,
+                destination=v_aligned,
+                src_transform=v_transform,
+                src_crs=src.crs,
+                dst_transform=lcc_transform,
+                dst_crs=lcc_crs,
+                resampling=Resampling.nearest,
+                src_nodata=np.nan,
+                dst_nodata=np.nan,
+            )
 
-        v_numeric = v_aligned.compute().values
+            # Optimized Statistics Calculation
+            # Flatten to 1D arrays for vectorization
+            v_flat = v_aligned.ravel()
+            lcc_flat = aligned_lcc_win.ravel()
 
-        lcc_invalid = (aligned_lcc_win == 0) | (aligned_lcc_win == 255)
+            # LCC Invalid mask (0, 255, and NaN)
+            lcc_invalid = (lcc_flat == 0) | (lcc_flat == 255) | np.isnan(lcc_flat)
 
-        results = []
-        for lcc_id in lcc_columns:
-            mask = (aligned_lcc_win == lcc_id) & (~np.isnan(v_numeric)) & (~lcc_invalid)
+            # Valid pixels where both LCC and Value exist
+            valid_mask = (~lcc_invalid) & (~np.isnan(v_flat))
 
-            group_vals = v_numeric[mask]
+            if not np.any(valid_mask):
+                return [np.nan] * len(lcc_columns)
 
-            if group_vals.size > 0:
-                if stat == "mean":
-                    val = np.nanmean(group_vals)
-                elif stat == "max":
-                    val = np.nanmax(group_vals)
-                else:
-                    val = np.nan
-            else:
-                val = np.nan
+            # Use Pandas GroupBy to replace the Python 'for' loop
+            # This calculates stats for ALL columns in one pass
+            df = pd.DataFrame({"val": v_flat[valid_mask], "id": lcc_flat[valid_mask]})
+            grouped = df.groupby("id")["val"].agg(stat)
 
-            results.append(val)
-
-        return results
+            # Extract values in the specific order of lcc_columns
+            return [float(grouped.get(lcc_id, np.nan)) for lcc_id in lcc_columns]
 
     except Exception as e:
         print(f"LCC Sampling failed for {value_url}: {e}")
         return [np.nan] * len(lcc_columns)
-
-
-def sample_by_lcc_raster2(
-    value_url, aligned_lcc_win, lcc_columns, lcc_bounds, stat="mean"
-):
-    """
-    Resample the value_url to match the lcc resolution.
-    value_url
-    """
-    target_height, target_width = aligned_lcc_win.shape
-    with rasterio.open(value_url) as src:
-        v_window = lcc_bounds
-        # The url raster is resample to match the lcc raster
-        v_data = src.read(
-            1,
-            window=v_window,
-            out_shape=(target_height, target_width),
-            resampling=Resampling.nearest,
-            masked=True,
-        )
-        scale = src.scales[0] if src.scales[0] is not None else 1.0
-        offset = src.offsets[0] if src.offsets[0] is not None else 0.0
-        scr_nodata = src.nodata
-
-    # 1. CAST TO FLOAT FIRST
-    v_data_numeric = v_data.astype("float32")
-    if scr_nodata is not None:
-        # Replace the specific nodata value with NaN
-        v_data_numeric = np.where(v_data_numeric == scr_nodata, np.nan, v_data_numeric)
-
-    # scales is a list (one per band)
-    v_data_numeric = (v_data_numeric * scale) + offset
-
-    lcc_invalid = aligned_lcc_win == 0
-    results = []
-
-    for lcc_id in lcc_columns:
-        # Create mask
-        mask = (
-            (aligned_lcc_win == lcc_id) & (~np.isnan(v_data_numeric)) & (~lcc_invalid)
-        )
-        group_vals = v_data_numeric[mask]
-
-        if group_vals.size > 0:
-            val = np.nanmean(group_vals) if stat == "mean" else np.nanmax(group_vals)
-        else:
-            val = np.nan
-        results.append(val)
-    return results
 
 
 def get_raster_bbox(raster_path):
@@ -1608,7 +1471,7 @@ def wapor_dl(region, variables, period, project_foldr, data_type="raster", **kwa
 
     set_gdal_environment()
     client = initialize_multiprocessing()
-    nc_dir, csv_dir = setup_wapor_directories(project_foldr)
+    n_workers = os.cpu_count()
 
     ##set datatype:
     if data_type == "zonal_stat":
@@ -1632,7 +1495,7 @@ def wapor_dl(region, variables, period, project_foldr, data_type="raster", **kwa
 
     ## Get shapefile or lcc name to use it as part of the result file name
     if region is not None:
-        print(region)
+        # print(region)
         fname = os.path.splitext(os.path.basename(region))[0]
     elif data_type == "sample_by_lcc":
         if shapefile_path is not None:
@@ -1646,18 +1509,25 @@ def wapor_dl(region, variables, period, project_foldr, data_type="raster", **kwa
     else:
         bbox_rst = get_raster_bbox(lcc_raster_path)
         shape, bbox = get_shape_and_bbox(data_type, bbox_rst)
-    last_time_dict, _ = check_exsting_netcdf_file(nc_dir)
-    template = (
-        get_template_rst(project_foldr, variables, shape, bbox)
-        if data_type == "raster"
-        else None
-    )
+
+    if data_type == "raster":
+        nc_dir = setup_directory(project_foldr, fname, "nc")
+        last_time_dict, _ = check_exsting_netcdf_file(nc_dir)
+        template = get_template_rst(project_foldr, variables, shape, bbox)
+    else:
+        last_time_dict = {variable: period[0] for variable in variables}
+        template = None
+        csv_dir = setup_directory(project_foldr, fname, "csvs")
 
     for variable in variables:
         # 1. Handle Time/Period logic
-        current_period, time_info = get_adjusted_period(
-            variable, period, last_time_dict, shape, nc_dir, data_type
-        )
+        if data_type == "raster":
+            current_period, time_info = get_adjusted_period(
+                variable, period, last_time_dict, shape, nc_dir, data_type
+            )
+        else:
+            current_period = period
+            time_info = get_yrs_mns_dekads(period)
         # print("time_info", print(type(time_info)), time_info)
         if current_period[1] <= current_period[0]:
             print(f"No data to download for {variable} in this period.")
@@ -1697,7 +1567,6 @@ def wapor_dl(region, variables, period, project_foldr, data_type="raster", **kwa
                 xmax,
                 ymax,
                 crs,
-                fname,
             )
 
         else:
@@ -1713,7 +1582,7 @@ def wapor_dl(region, variables, period, project_foldr, data_type="raster", **kwa
                     continue  # Skip this variable if no points match
 
                 # This maybe be faster
-                with ThreadPoolExecutor(max_workers=10) as executor:
+                with ThreadPoolExecutor(max_workers=n_workers) as executor:
                     pt_data = list(
                         executor.map(
                             lambda u: sample_url_worker(u, pts_coords), meta["urls"]
@@ -1730,11 +1599,13 @@ def wapor_dl(region, variables, period, project_foldr, data_type="raster", **kwa
                     shape, polygons_col_name, meta["urls"][0], crs, variable
                 )
 
-                with ThreadPoolExecutor(max_workers=10) as executor:
+                poly_list = shdf.geometry.tolist()
+                with ThreadPoolExecutor(max_workers=n_workers) as executor:
+                    # Use a list to store the futures or results
                     poly_data = list(
                         executor.map(
                             lambda u: sample_url_worker_polygon(
-                                u, shdf.geometry, stat="mean"
+                                u, poly_list, stat="mean"
                             ),
                             meta["urls"],
                         )
@@ -1750,7 +1621,7 @@ def wapor_dl(region, variables, period, project_foldr, data_type="raster", **kwa
                     )
                 )
 
-                with ThreadPoolExecutor(max_workers=10) as executor:
+                with ThreadPoolExecutor(max_workers=n_workers) as executor:
                     lcc_group_data = list(
                         executor.map(
                             lambda u: sample_by_lcc_raster(
