@@ -19,12 +19,16 @@ This repository contains the following topics and associated Notebooks:
 
 It is recommended that you have completed the MOOC [Python for Geospatial analyses using WaPOR data](https://ocw.un-ihe.org/course/view.php?id=272&section=0) before starting this course.
 
-This material is brought to you by the Water Accounting Team at IHE Delft Institute for Water Education
+This material is brought to you by the [Water Accounting Team at IHE Delft Institute for Water Education](https://wateraccounting.un-ihe.org/en/)
 
 © 2024 IHE Delft Licenced under CC BY SA Creative Commons
 
 ** **
 **For more on WaPOR applications check out these other courses:**
+
+[Introduction to WaPORv3](https://ocw.un-ihe.org/course/view.php?id=263) (also available in [French](https://ocw.un-ihe.org/course/view.php?id=270) and [Spanish](https://ocw.un-ihe.org/course/view.php?id=269)) provides a brief introduction on the WaPOR database and how to access the data and do some simple analyses using QGIS.
+
+[Python for Geospatial analyses using WaPOR data](https://ocw.un-ihe.org/course/view.php?id=272) provides an essential guide for using python for geospatial analyse using the WaPOR database. 
 
 [Water Accounting and Water Productivity using WaPOR](https://ocw.un-ihe.org/course/view.php?id=92) (module 2 and 3) provides additional materials on how to implement water accounting and water productivity analyses using the WaPOR data (also available in [French](https://ocw.un-ihe.org/course/view.php?id=117) and [Arabic](https://ocw.un-ihe.org/course/view.php?id=118))
 
@@ -36,4 +40,4 @@ This material is brought to you by the Water Accounting Team at IHE Delft Instit
 
 More courses are available on the [OpenCourseWare platform](https://ocw.un-ihe.org) of [IHE Delft Institute for Water Education](https://un-ihe.org)
 
-![image](images/OCW_IHE.JPG)
+![image](https://github.com/wateraccounting/WaPORMOOC/blob/main/images/OCW_IHE.JPG)
