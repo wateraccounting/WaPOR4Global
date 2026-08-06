@@ -13,7 +13,7 @@ This repository contains the following topics and associated Notebooks:
     a. [Notebook 3.1 Correlation analyses](https://github.com/wateraccounting/WaPOR4Global/blob/main/3_Correlation_Analyses/Notebook_3.1_Correlation_Analyses.ipynb)\
     b. [Notebook 3.2 Visualising correlation analyses](https://github.com/wateraccounting/WaPOR4Global/blob/main/3_Correlation_Analyses/Notebook_3.2_Visualising_Correlation_Analyses.ipynb)\
     c. [Notebook 3.3 Estimating Irrigated Areas using GEE](https://github.com/wateraccounting/WaPOR4Global/blob/main/3_Correlation_Analyses/Notebook_3.3_Estimating_irrigated_area_using_GEE.ipynb)\
-    d. [Notebook 3.4 Dashboard_WaPOR4Global](https://github.com/wateraccounting/WaPOR4Global/blob/main/3_Correlation_Analyses/Notebook_3.4_Dashboard_WaPOR4GlobalMOOC.ipynb)
+    d. [Notebook 3.4 Creating WaPOR4Global dashboard](https://github.com/wateraccounting/WaPOR4Global/blob/main/3_Correlation_Analyses/Notebook_3.4_Dashboard_WaPOR4GlobalMOOC.ipynb)
 4. [Forecasting](https://github.com/wateraccounting/WaPOR4Global/tree/main/4_Forecasting)\
     a. [Notebook 4. Field level forecasting](https://github.com/wateraccounting/WaPOR4Global/blob/main/4_Forecasting/Notebook_4_Field_Level_Forecasting.ipynb)
 
