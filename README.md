@@ -1,5 +1,5 @@
 # WaPOR4Global
-![image](images/Banner_1.jpg)
+![image](images/Banner_2.jpg)
 
 This repository supports IHE Delft's MOOC on [Global Challenges for Water in Agriculture](https://ocw.un-ihe.org/course/view.php?id=302), funded by the [second phase of WaPOR](https://www.fao.org/in-action/remote-sensing-for-water-productivity/). 
 
