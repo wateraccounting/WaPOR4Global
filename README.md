@@ -1,6 +1,8 @@
 # WaPOR4Global
 This repository supports IHE Delft's MOOC on [Global Challenges for Water in Agriculture](https://ocw.un-ihe.org/course/view.php?id=302), funded by the [second phase of WaPOR](https://www.fao.org/in-action/remote-sensing-for-water-productivity/). 
 
+![image](images/Banner_1.JPG)
+
 The course focusses on how WaPOR data can be used to monitor global challenges for water in agriculture. It will provide an introduction in the current global challenges of providing sufficient food, feed and fibre for a growing population and challenged by changing climatic conditions. It then dives into applications using the WaPOR data to assess, monitor and predict various aspects of water in agriculture for a location in Iraq. This starts with hands-on exercises for accessing WaPOR and other relevant datasets, applying different types of spatio- and temporal analyses and predict future conditions using the WaPOR data and finally visualising the results. The final assignment is to apply lessons learned for your own case study. 
 
 This repository contains the following topics and associated Notebooks:
