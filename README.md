@@ -18,6 +18,8 @@ This repository contains the following topics and associated Notebooks:
     d. [Notebook 3.4 Creating WaPOR4Global dashboard](https://github.com/wateraccounting/WaPOR4Global/blob/main/3_Correlation_Analyses/Notebook_3.4_Dashboard_WaPOR4GlobalMOOC.ipynb). Link to [Colab Notebook](https://colab.research.google.com/github/wateraccounting/WaPOR4Global/blob/main/3_Correlation_Analyses/Notebook_3.4_Dashboard_WaPOR4GlobalMOOC.ipynb?target=%22_blank%22)
 4. Forecasting\
     a. [Notebook 4. Forecasting](https://github.com/wateraccounting/WaPOR4Global/blob/main/4_Forecasting/Notebook_4_Field_Level_Forecasting.ipynb). Link to [Colab Notebook](https://colab.research.google.com/github/wateraccounting/WaPOR4Global/blob/main/4_Forecasting/Notebook_4_Field_Level_Forecasting.ipynb?target=%22_blank%22)
+5. Creating Dashboard
+   a. [Notebook 5. Creating WaPOR4Global dashboard using Bokeh]()
 
 It is recommended that you have completed the MOOC [Python for Geospatial analyses using WaPOR data](https://ocw.un-ihe.org/course/view.php?id=272&section=0) before starting this course.
 
